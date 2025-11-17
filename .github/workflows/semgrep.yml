@@ -24,7 +24,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - run: semgrep ci
-name: Send Detailed Discord Notification
+
+         - name: Send Detailed Discord Notification
       if: always()
       run: |
         # Install jq in case it's not present
