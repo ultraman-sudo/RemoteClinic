@@ -1,62 +1,67 @@
-name: Semgrep Scan
-on: [push, pull_request]
-
+on:
+  workflow_dispatch: {}
+  pull_request: {}
+  push:
+    branches:
+    - main
+    - master
+    paths:
+    - .github/workflows/semgrep.yml
+  schedule:
+  # random HH:MM to avoid a load spike on GitHub Actions at 00:00
+  - cron: 40 16 * * *
+name: Semgrep
 jobs:
   semgrep:
+    name: semgrep/ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    container:
+      image: semgrep/semgrep
     steps:
-      - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+    - run: semgrep ci
+name: Send Detailed Discord Notification
+      if: always()
+      run: |
+        # Install jq in case it's not present
+        sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: auto
+        # Save Semgrep JSON output
+        semgrep ci --json --output=semgrep_results.json
 
-      - name: Send Discord Notification
-        if: failure() || success()
-        run: |
-          SUMMARY=$(jq -r '.results | length' semgrep_results.json)
+        # Count total vulnerabilities
+        total_issues=$(jq '.results | length' semgrep_results.json)
+
+        if [ "$total_issues" -eq 0 ]; then
           curl -H "Content-Type: application/json" \
                -X POST \
-               -d "{\"content\": \"⚠️ Semgrep found **$SUMMARY** issues in the latest scan.\"}" \
+               -d "{\"content\": \"✅ Semgrep scan complete — no vulnerabilities found.\"}" \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
+        else
+          # Initialize message
+          message="⚠️ Semgrep found *$total_issues* vulnerabilities:\n"
 
-      # ---------- New Step: Detailed Discord Notification ----------
-      - name: Send Detailed Discord Notification
-        if: always()
-        run: |
-          # Install jq if not present
-          sudo apt-get update && sudo apt-get install -y jq
+          # Loop through each issue safely
+          jq -c '.results[]' semgrep_results.json | while read issue; do
+            check_name=$(echo "$issue" | jq -r '.check_id')
+            path=$(echo "$issue" | jq -r '.path')
+            start_line=$(echo "$issue" | jq -r '.start.line')
+            end_line=$(echo "$issue" | jq -r '.end.line')
+            description=$(echo "$issue" | jq -r '.extra.message' | cut -c1-500)
+            mitigation=$(echo "$issue" | jq -r '.extra.metadata.recommendation // "No mitigation provided"' | cut -c1-500)
 
-          # Count total vulnerabilities
-          total_issues=$(jq '.results | length' semgrep_results.json)
+            message="$message\n**$check_name**\nFile: $path [$start_line-$end_line]\nDescription: $description\nMitigation: $mitigation\n"
+          done
 
-          if [ "$total_issues" -eq 0 ]; then
+          # Split messages for Discord (max 2000 chars per message)
+          echo "$message" | fold -w 1900 -s | while read chunk; do
             curl -H "Content-Type: application/json" \
                  -X POST \
-                 -d "{\"content\": \"✅ Semgrep scan complete — no vulnerabilities found.\"}" \
+                 -d "{\"content\": \"$chunk\"}" \
                  ${{ secrets.DISCORD_WEBHOOK_URL }}
-          else
-            # Initialize message
-            message="⚠️ Semgrep found *$total_issues* vulnerabilities:\n"
-
-            # Loop safely through each issue
-            jq -c '.results[]' semgrep_results.json | while read issue; do
-              check_name=$(echo "$issue" | jq -r '.check_id')
-              path=$(echo "$issue" | jq -r '.path')
-              start_line=$(echo "$issue" | jq -r '.start.line')
-              end_line=$(echo "$issue" | jq -r '.end.line')
-              description=$(echo "$issue" | jq -r '.extra.message' | cut -c1-500)
-              mitigation=$(echo "$issue" | jq -r '.extra.metadata.recommendation // "No mitigation provided"' | cut -c1-500)
-
-              message="$message\n**$check_name**\nFile: $path [$start_line-$end_line]\nDescription: $description\nMitigation: $mitigation\n"
-            done
-
-            # Split messages for Discord (max 2000 chars per message)
-            echo "$message" | fold -w 1900 -s | while read chunk; do
-              curl -H "Content-Type: application/json" \
-                   -X POST \
-                   -d "{\"content\": \"$chunk\"}" \
-                   ${{ secrets.DISCORD_WEBHOOK_URL }}
-            done
-          fi
+          done
+        fi
