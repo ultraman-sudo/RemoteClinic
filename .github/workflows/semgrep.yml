@@ -1,22 +1,47 @@
-name: Semgrep Scan
-on: [push, pull_request]
+on:
+  workflow_dispatch: {}
+  pull_request: {}
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - .github/workflows/semgrep.yml
+  schedule:
+    - cron: 40 16 * * *
+
+name: Semgrep
 
 jobs:
   semgrep:
+    name: semgrep/ci
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+    container:
+      image: semgrep/semgrep
+
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
+      # Run Semgrep + save JSON report
       - name: Run Semgrep
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: auto
+        run: semgrep ci --json --output=semgrep.json
 
+      # Send Discord Notification
       - name: Send Discord Notification
-        if: failure() || success()
         run: |
-          SUMMARY=$(jq -r '.results | length' semgrep_results.json)
+          issues=$(jq '.results | length' semgrep.json)
+
+          if [ "$issues" -gt 0 ]; then
+            msg="⚠️ Semgrep found **$issues** potential vulnerabilities in Remote Clinic Repo."
+          else
+            msg="✅ Semgrep scan complete — no vulnerabilities found in Remote Clinic Repo."
+          fi
+
           curl -H "Content-Type: application/json" \
                -X POST \
-               -d "{\"content\": \"⚠️ Semgrep found **$SUMMARY** issues in the latest scan in Remote Clinic Repo.\"}" \
+               -d "{\"content\": \"$msg\"}" \
                ${{ secrets.DISCORD_WEBHOOK_URL }}
