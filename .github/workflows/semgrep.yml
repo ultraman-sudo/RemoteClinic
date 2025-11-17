@@ -20,28 +20,54 @@ jobs:
       contents: read
     env:
       SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
     container:
       image: semgrep/semgrep
 
     steps:
       - uses: actions/checkout@v4
 
-      # Run Semgrep + save JSON report
+      # Run Semgrep and save JSON report
       - name: Run Semgrep
         run: semgrep ci --json --output=semgrep.json
 
-      # Send Discord Notification
+      # Send detailed Discord notification
       - name: Send Discord Notification
         run: |
-          issues=$(jq '.results | length' semgrep.json)
-
-          if [ "$issues" -gt 0 ]; then
-            msg="⚠️ Semgrep found **$issues** potential vulnerabilities!"
-          else
-            msg="✅ Semgrep scan complete — no vulnerabilities found."
+          # Check if jq is available (install if not)
+          if ! command -v jq &> /dev/null
+          then
+              sudo apt-get update && sudo apt-get install -y jq
           fi
 
-          curl -H "Content-Type: application/json" \
-               -X POST \
-               -d "{\"content\": \"$msg\"}" \
-               ${{ secrets.DISCORD_WEBHOOK_URL }}
+          total_issues=$(jq '.results | length' semgrep.json)
+          
+          if [ "$total_issues" -eq 0 ]; then
+            curl -H "Content-Type: application/json" \
+                 -X POST \
+                 -d "{\"content\": \"✅ Semgrep scan complete — no vulnerabilities found.\"}" \
+                 $DISCORD_WEBHOOK_URL
+          else
+            # Build a detailed message for each issue
+            message="⚠️ Semgrep found *$total_issues* vulnerabilities:\n"
+            
+            # Loop through each issue
+            jq -c '.results[]' semgrep.json | while read issue; do
+              check_name=$(echo "$issue" | jq -r '.check_id')
+              path=$(echo "$issue" | jq -r '.path')
+              start_line=$(echo "$issue" | jq -r '.start.line')
+              end_line=$(echo "$issue" | jq -r '.end.line')
+              message_text=$(echo "$issue" | jq -r '.extra.message')
+              mitigation=$(echo "$issue" | jq -r '.extra.metadata.recommendation // "No mitigation provided"')
+
+              message="$message\n**$check_name**\nFile: $path [$start_line-$end_line]\nDescription: $message_text\nMitigation: $mitigation\n"
+            done
+
+            # Discord message max length is 2000 chars, split if needed
+            echo "$message" | fold -w 1900 -s | while read chunk; do
+              curl -H "Content-Type: application/json" \
+                   -X POST \
+                   -d "{\"content\": \"$chunk\"}" \
+                   $DISCORD_WEBHOOK_URL
+            done
+          fi
